@@ -164,11 +164,37 @@ type TaskProgress struct {
 	Message    string   `json:"message,omitempty"`
 }
 
+type TaskLogEntry struct {
+	Seq     int64           `json:"seq"`
+	Level   string          `json:"level"`
+	Message string          `json:"message"`
+	Stream  string          `json:"stream,omitempty"`
+	Fields  json.RawMessage `json:"fields,omitempty"`
+	Ts      string          `json:"ts"`
+}
+
+type TaskLog struct {
+	AttemptID    string         `json:"attempt_id"`
+	LeaseToken   string         `json:"lease_token"`
+	Entries      []TaskLogEntry `json:"entries"`
+	Dropped      int            `json:"dropped,omitempty"`
+	DroppedInfo  int            `json:"dropped_info,omitempty"`
+	DroppedWarn  int            `json:"dropped_warn,omitempty"`
+	DroppedError int            `json:"dropped_error,omitempty"`
+}
+
+type TaskCheckpoint struct {
+	AttemptID  string          `json:"attempt_id"`
+	LeaseToken string          `json:"lease_token"`
+	State      json.RawMessage `json:"state"`
+}
+
 type TaskCompleted struct {
 	AttemptID  string          `json:"attempt_id"`
 	LeaseToken string          `json:"lease_token"`
 	FinishedAt string          `json:"finished_at"`
 	Result     json.RawMessage `json:"result,omitempty"`
+	NextState  json.RawMessage `json:"next_state,omitempty"`
 }
 
 type TaskFailedError struct {
@@ -187,10 +213,11 @@ type TaskFailed struct {
 }
 
 type TaskResultAck struct {
-	Status    string `json:"status"`
-	AttemptID string `json:"attempt_id"`
-	ErrorCode string `json:"error_code,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Status          string `json:"status"`
+	AttemptID       string `json:"attempt_id"`
+	ErrorCode       string `json:"error_code,omitempty"`
+	Message         string `json:"message,omitempty"`
+	AckedThroughSeq *int64 `json:"acked_through_seq,omitempty"`
 }
 
 type TaskCancel struct {
@@ -212,6 +239,27 @@ type TaskCancelled struct {
 	LeaseToken string `json:"lease_token"`
 	FinishedAt string `json:"finished_at"`
 	StoppedBy  string `json:"stopped_by,omitempty"`
+}
+
+type TaskSyncRunning struct {
+	Attempts []TaskSyncRunningItem `json:"attempts"`
+}
+
+type TaskSyncRunningItem struct {
+	ExecutionID string `json:"execution_id"`
+	AttemptID   string `json:"attempt_id"`
+	LeaseToken  string `json:"lease_token"`
+}
+
+type TaskSyncRunningAck struct {
+	Results []TaskSyncRunningResult `json:"results"`
+}
+
+type TaskSyncRunningResult struct {
+	AttemptID      string `json:"attempt_id"`
+	Status         string `json:"status"`
+	LeaseExpiresAt string `json:"lease_expires_at,omitempty"`
+	Message        string `json:"message,omitempty"`
 }
 
 type SystemError struct {

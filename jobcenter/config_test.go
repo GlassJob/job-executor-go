@@ -1,7 +1,6 @@
 package jobcenter
 
 import (
-	"context"
 	"testing"
 
 	"github.com/GlassJob/job-executor-go/protocol"
@@ -55,17 +54,8 @@ func TestHandleCancelMarksRequested(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeCh := make(chan writeReq, 4)
-	go func() {
-		for req := range writeCh {
-			if req.err != nil {
-				req.err <- nil
-			}
-		}
-	}()
-	c.handleCancel(context.Background(), writeCh, &protocol.TaskCancel{AttemptID: "a1", LeaseToken: "L"})
+	c.handleCancel(&protocol.TaskCancel{AttemptID: "a1", LeaseToken: "L"})
 	if !c.wasCancelRequested("a1") {
 		t.Fatal("expected cancel requested")
 	}
-	close(writeCh)
 }

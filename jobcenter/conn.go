@@ -92,13 +92,17 @@ func (c *Client) runOnce(ctx context.Context) error {
 	}
 
 	writeCh := make(chan writeReq, 64)
+	sess := &sessionSend{ctx: sessCtx, writeCh: writeCh}
+	c.setSessionSend(sess)
+	defer c.clearSessionSend(sess)
+
 	var wg sync.WaitGroup
 	errCh := make(chan error, 3)
 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		errCh <- c.readLoop(sessCtx, conn, writeCh)
+		errCh <- c.readLoop(sessCtx, conn)
 		sessCancel()
 	}()
 
@@ -109,19 +113,27 @@ func (c *Client) runOnce(ctx context.Context) error {
 		sessCancel()
 	}()
 
+	// 读写循环起来后再：重放终态 → sync 在跑任务 → flush 非终态缓冲。
+	c.replayPending()
+	c.doSyncRunning(sessCtx, writeCh)
+	c.flushSoftOutbox()
+
 	select {
 	case <-sessCtx.Done():
 	case err := <-errCh:
 		sessCancel()
 		if err != nil && !errors.Is(err, context.Canceled) {
 			wg.Wait()
-			_ = c.doUnregister(context.Background(), conn)
+			// 瞬时断线不 unregister，保留本地 running / pending。
+			if ctx.Err() != nil {
+				_ = c.doUnregister(context.Background(), conn)
+			}
 			return err
 		}
 	}
 	wg.Wait()
-	_ = c.doUnregister(context.Background(), conn)
 	if ctx.Err() != nil {
+		_ = c.doUnregister(context.Background(), conn)
 		return ctx.Err()
 	}
 	return fmt.Errorf("session closed")
@@ -174,7 +186,7 @@ func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn, writeCh <-
 	}
 }
 
-func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, writeCh chan writeReq) error {
+func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
 	for {
 		var env protocol.Envelope
 		err := wsjson.Read(ctx, conn, &env)
@@ -192,17 +204,91 @@ func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn, writeCh cha
 				c.cfg.Logger.Error("bad task.execute", "err", err)
 				continue
 			}
-			go c.handleExecute(ctx, writeCh, &ex)
+			go c.handleExecute(&ex)
 		case protocol.TypeTaskCancel:
 			var cancelMsg protocol.TaskCancel
 			if err := env.DecodeData(&cancelMsg); err != nil {
 				continue
 			}
-			c.handleCancel(ctx, writeCh, &cancelMsg)
-		case protocol.TypeTaskResultAck, protocol.TypeSystemNotice, protocol.TypeSystemError,
+			c.handleCancel(&cancelMsg)
+		case protocol.TypeTaskResultAck:
+			var ack protocol.TaskResultAck
+			if err := env.DecodeData(&ack); err != nil {
+				continue
+			}
+			c.onResultAck(ack)
+		case protocol.TypeTaskSyncRunningAck:
+			var ack protocol.TaskSyncRunningAck
+			if err := env.DecodeData(&ack); err != nil {
+				continue
+			}
+			select {
+			case c.syncAckCh <- &ack:
+			default:
+				select {
+				case <-c.syncAckCh:
+				default:
+				}
+				select {
+				case c.syncAckCh <- &ack:
+				default:
+				}
+			}
+			c.applySyncRunningAck(&ack)
+		case protocol.TypeSystemNotice, protocol.TypeSystemError,
 			protocol.TypeAuthResponse, protocol.TypeServiceRegisterAck:
 		default:
 			c.cfg.Logger.Debug("ignored message", "type", env.Type)
+		}
+	}
+}
+
+func (c *Client) doSyncRunning(ctx context.Context, writeCh chan writeReq) {
+	c.mu.Lock()
+	items := make([]protocol.TaskSyncRunningItem, 0, len(c.running))
+	for id, rt := range c.running {
+		items = append(items, protocol.TaskSyncRunningItem{
+			ExecutionID: rt.executionID,
+			AttemptID:   id,
+			LeaseToken:  rt.leaseToken,
+		})
+	}
+	c.mu.Unlock()
+	if len(items) == 0 {
+		return
+	}
+	// 清空陈旧 ack
+	select {
+	case <-c.syncAckCh:
+	default:
+	}
+	if err := c.enqueue(ctx, writeCh, protocol.TypeTaskSyncRunning, protocol.TaskSyncRunning{Attempts: items}); err != nil {
+		c.cfg.Logger.Warn("sync_running send", "err", err)
+		return
+	}
+	select {
+	case <-ctx.Done():
+	case ack := <-c.syncAckCh:
+		c.applySyncRunningAck(ack)
+	case <-time.After(10 * time.Second):
+		c.cfg.Logger.Warn("sync_running ack timeout")
+	}
+}
+
+func (c *Client) applySyncRunningAck(ack *protocol.TaskSyncRunningAck) {
+	if ack == nil {
+		return
+	}
+	for _, r := range ack.Results {
+		switch r.Status {
+		case "GONE":
+			c.cfg.Logger.Info("sync_running gone", "attempt_id", r.AttemptID, "msg", r.Message)
+			c.stopLocalAttempt(r.AttemptID)
+			if c.pending != nil {
+				c.pending.Remove(r.AttemptID)
+			}
+		case "REJECTED":
+			c.cfg.Logger.Warn("sync_running rejected", "attempt_id", r.AttemptID, "msg", r.Message)
 		}
 	}
 }

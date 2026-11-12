@@ -34,6 +34,8 @@ const (
 	TypeTaskCancel          = "task.cancel"
 	TypeTaskCancelAck       = "task.cancel_ack"
 	TypeTaskCancelled       = "task.cancelled"
+	TypeTaskSyncRunning     = "task.sync_running"
+	TypeTaskSyncRunningAck  = "task.sync_running_ack"
 	TypeSystemError         = "system.error"
 	TypeSystemNotice        = "system.notice"
 )

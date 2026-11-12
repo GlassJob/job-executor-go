@@ -3,9 +3,12 @@ package jobcenter
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/GlassJob/job-executor-go/protocol"
 )
 
 type ClientStatus struct {
@@ -23,8 +26,9 @@ type Client struct {
 	jobs   map[string]Job
 	status atomic.Value // ClientStatus
 
-	cancel context.CancelFunc
-	done   chan struct{}
+	cancel  context.CancelFunc
+	lifeCtx context.Context
+	done    chan struct{}
 
 	inFlight        atomic.Int32
 	globalSem       chan struct{}
@@ -34,11 +38,25 @@ type Client struct {
 
 	serverInstanceID string
 	sessionEpoch     int64
+
+	pending     *pendingStore
+	sendMu      sync.Mutex
+	sessionSend *sessionSend
+	softMu      sync.Mutex
+	softBuf     []softMsg
+	syncAckCh   chan *protocol.TaskSyncRunningAck
+
+	logBufMu sync.Mutex
+	logBufs  map[string]*attemptLogBuf
 }
 
 func NewClient(cfg Config) (*Client, error) {
 	if err := cfg.defaults(); err != nil {
 		return nil, err
+	}
+	pending, err := newPendingStore(filepath.Join(cfg.DataDir, "pending_results"))
+	if err != nil {
+		return nil, fmt.Errorf("pending store: %w", err)
 	}
 	c := &Client{
 		cfg:             cfg,
@@ -48,6 +66,8 @@ func NewClient(cfg Config) (*Client, error) {
 		seenAttempts:    make(map[string]time.Time),
 		cancelRequested: make(map[string]bool),
 		globalSem:       make(chan struct{}, cfg.MaxConcurrency),
+		pending:         pending,
+		syncAckCh:       make(chan *protocol.TaskSyncRunningAck, 1),
 	}
 	c.status.Store(ClientStatus{InstanceKey: cfg.InstanceKey})
 	return c, nil
@@ -81,12 +101,52 @@ func (c *Client) Start(ctx context.Context) error {
 		return fmt.Errorf("client already started")
 	}
 	c.cancel = cancel
+	c.lifeCtx = ctx
 	c.done = make(chan struct{})
 	c.mu.Unlock()
 	defer close(c.done)
 
 	c.initWorkerState()
+	go c.runLogFlusher(ctx)
 	return c.runSession(ctx)
+}
+
+func (c *Client) registerLogBuf(attemptID string, buf *attemptLogBuf) {
+	c.logBufMu.Lock()
+	defer c.logBufMu.Unlock()
+	if c.logBufs == nil {
+		c.logBufs = make(map[string]*attemptLogBuf)
+	}
+	c.logBufs[attemptID] = buf
+}
+
+func (c *Client) unregisterLogBuf(attemptID string) *attemptLogBuf {
+	c.logBufMu.Lock()
+	defer c.logBufMu.Unlock()
+	buf := c.logBufs[attemptID]
+	delete(c.logBufs, attemptID)
+	return buf
+}
+
+func (c *Client) runLogFlusher(ctx context.Context) {
+	t := time.NewTicker(logFlushEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			c.logBufMu.Lock()
+			bufs := make([]*attemptLogBuf, 0, len(c.logBufs))
+			for _, b := range c.logBufs {
+				bufs = append(bufs, b)
+			}
+			c.logBufMu.Unlock()
+			for _, b := range bufs {
+				b.Flush()
+			}
+		}
+	}
 }
 
 func (c *Client) Stop(ctx context.Context) error {
@@ -124,4 +184,13 @@ func (c *Client) snapshotJobs() []Job {
 		out = append(out, j)
 	}
 	return out
+}
+
+func (c *Client) lifeContext() context.Context {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.lifeCtx != nil {
+		return c.lifeCtx
+	}
+	return context.Background()
 }

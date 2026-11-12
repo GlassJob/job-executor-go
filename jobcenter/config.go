@@ -41,6 +41,8 @@ type Config struct {
 	Logger         *slog.Logger
 	Labels         map[string]string
 	SDKVersion     string
+	// DataDir 存放终态 pending（默认 ./data）；也可用环境变量 JC_DATA_DIR。
+	DataDir string
 }
 
 func (c *Config) defaults() error {
@@ -93,6 +95,13 @@ func (c *Config) defaults() error {
 	}
 	if len(c.InstanceKey) > 128 {
 		c.InstanceKey = c.InstanceKey[:128]
+	}
+	if c.DataDir == "" {
+		if v := strings.TrimSpace(os.Getenv("JC_DATA_DIR")); v != "" {
+			c.DataDir = v
+		} else {
+			c.DataDir = "./data"
+		}
 	}
 	return nil
 }
