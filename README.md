@@ -44,3 +44,7 @@ Admin 触发：`POST /v1/admin/services/:serviceId/jobs/:jobId/executions`
 
 - 短断：本地任务继续，重连后 sync + 补报。
 - 任务已跑完而 Center 未上线：终态先落盘，Center 恢复或执行器重启后重放，直到 ack。
+
+## License
+
+本项目采用 [Apache License 2.0](LICENSE)。第三方依赖仍保留原许可证，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。分发包含依赖的二进制或源码包时，请保留相应版权与许可声明。
